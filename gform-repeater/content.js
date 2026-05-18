@@ -55,6 +55,7 @@ async function postForm(action, body) {
 function askRepetitions() {
   return new Promise(resolve => {
     const overlay = document.createElement('div');
+    overlay.id = '_gfr_overlay';
     overlay.style.cssText = [
       'position:fixed', 'inset:0', 'z-index:2147483647',
       'background:rgba(0,0,0,.45)',
@@ -114,10 +115,10 @@ function getBanner() {
   return b;
 }
 
-// Vérifie si l'élément (ou son ancêtre [role="button"] le plus proche) est le bouton de soumission.
 function isSubmitButton(el) {
+  if (el.closest('#_gfr_overlay')) return false;
   const btn = el.closest('[role="button"]') ?? el;
-  return /^(envoyer|submit)$/i.test(btn.textContent.trim());
+  return /envoyer|submit|soumettre/i.test(btn.textContent.trim());
 }
 
 async function handleGlobalClick(e) {
@@ -166,7 +167,11 @@ async function handleGlobalClick(e) {
   // exécuter sa logique native et afficher la page de confirmation.
   await sleep(1000);
   document.removeEventListener('mousedown', handleGlobalClick, true);
-  form.submit();
+
+  const opts = { bubbles: true, cancelable: true, view: window };
+  submitEl.dispatchEvent(new MouseEvent('mousedown', opts));
+  submitEl.dispatchEvent(new MouseEvent('mouseup', opts));
+  submitEl.dispatchEvent(new MouseEvent('click', opts));
 }
 
 document.addEventListener('mousedown', handleGlobalClick, true);

@@ -133,7 +133,12 @@ async function handleGlobalClick(e) {
   e.stopPropagation();
 
   // Capture au moment du clic, avant l'ouverture de la modale.
-  const entries  = captureEntries(form);
+  // On ne conserve que les champs de réponse utilisateur (entry.*) pour que
+  // chaque fetch soit traité comme une soumission indépendante par Google.
+  const raw     = captureEntries(form);
+  const entries = Object.fromEntries(
+    Object.entries(raw).filter(([k]) => k.startsWith('entry.'))
+  );
   const submitEl = e.target.closest('[role="button"]') ?? e.target;
 
   const n = await askRepetitions();

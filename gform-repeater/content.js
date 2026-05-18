@@ -165,14 +165,8 @@ async function handleGlobalClick(e) {
   // Supprime notre intercepteur puis re-déclenche le bouton pour laisser Google
   // exécuter sa logique native et afficher la page de confirmation.
   await sleep(1000);
-  document.removeEventListener('click', handleGlobalClick, true);
-
-  // Préfère une re-requête au cas où React aurait recréé le nœud DOM.
-  const btn = document.querySelector('[role="button"]') &&
-    [...document.querySelectorAll('[role="button"]')]
-      .find(b => /^(envoyer|submit)$/i.test(b.textContent.trim()));
-
-  (btn ?? submitEl).click();
+  document.removeEventListener('mousedown', handleGlobalClick, true);
+  form.submit();
 }
 
-document.addEventListener('click', handleGlobalClick, true);
+document.addEventListener('mousedown', handleGlobalClick, true);

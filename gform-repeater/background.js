@@ -1,7 +1,11 @@
+// Service worker — reçoit le body exact capturé par interceptor.js et envoie N requêtes.
+// Origine chrome-extension:// → cross-origin vers docs.google.com → aucun cookie Google
+// envoyé par défaut → chaque POST est traité comme une nouvelle soumission anonyme.
+
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (msg.type !== 'START') return true;
 
-  const { entries, formAction, n, delay } = msg;
+  const { formAction, rawBody, n, delay } = msg;
   const sourceTabId = sender.tab.id;
 
   async function run() {
@@ -11,21 +15,17 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       if (i > 0) await new Promise(r => setTimeout(r, delay));
 
       try {
-        // Le service worker n'a pas de session navigateur : aucun cookie Google
-        // n'est attaché → chaque requête apparaît comme une soumission indépendante.
-        const body = new URLSearchParams(entries).toString();
-
         const res = await fetch(formAction, {
           method:  'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body,
+          body:    rawBody, // copie exacte du body que Google Forms a construit
         });
 
-        // Google répond 200 (avec redirect suivi) ou la réponse est marquée redirected
+        // Google répond 200 (ou redirige) quand la soumission est acceptée
         if (res.ok || res.redirected) success++;
 
       } catch (err) {
-        console.warn('[GFR] erreur requête', i + 1, err.message);
+        console.warn('[GFR] erreur requête', i + 1, ':', err.message);
       }
 
       chrome.tabs.sendMessage(sourceTabId, {
@@ -39,5 +39,5 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   }
 
   run();
-  return true; // maintient le canal ouvert pour les sendMessage asynchrones
+  return true; // maintient le canal de message ouvert pour les sendMessage async
 });

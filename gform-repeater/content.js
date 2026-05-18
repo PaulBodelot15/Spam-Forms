@@ -1,31 +1,7 @@
+// Monde ISOLÉ — reçoit les données via CustomEvent depuis interceptor.js,
+// affiche la modale, délègue les N envois au service worker.
+
 let isRunning = false;
-
-// ── Capture des entry.* ────────────────────────────────────────────────────────
-
-function captureEntries(form) {
-  const entries = {};
-
-  // Méthode principale : FormData (fonctionne si les hidden inputs sont à jour)
-  try {
-    new FormData(form).forEach((v, k) => {
-      if (k.startsWith('entry.')) entries[k] = v;
-    });
-  } catch (_) {}
-
-  // Fallback : interroger directement les éléments nommés entry.*
-  // (nécessaire quand React n'a pas encore synchronisé son état vers les hidden inputs)
-  if (Object.keys(entries).length === 0) {
-    form.querySelectorAll('[name^="entry."]').forEach(el => {
-      if (el.type === 'radio' || el.type === 'checkbox') {
-        if (el.checked) entries[el.name] = el.value;
-      } else if (el.value) {
-        entries[el.name] = el.value;
-      }
-    });
-  }
-
-  return entries;
-}
 
 // ── Modale ─────────────────────────────────────────────────────────────────────
 
@@ -77,7 +53,7 @@ function askRepetitions() {
   });
 }
 
-// ── Bannière de progression ────────────────────────────────────────────────────
+// ── Bannière ───────────────────────────────────────────────────────────────────
 
 function getBanner() {
   let b = document.getElementById('_gfr_banner');
@@ -94,7 +70,7 @@ function getBanner() {
   return b;
 }
 
-// ── Écoute de la progression renvoyée par le background ───────────────────────
+// ── Progression renvoyée par le background ─────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg) => {
   const banner = getBanner();
@@ -103,53 +79,38 @@ chrome.runtime.onMessage.addListener((msg) => {
     banner.textContent = `Envoi en cours… ${msg.current} / ${msg.total}`;
   }
   if (msg.type === 'DONE') {
-    banner.style.background = msg.success === msg.total ? '#0f9d58' : '#f29900';
-    banner.textContent = `✓ ${msg.success} / ${msg.total} réponses envoyées.`;
+    const allOk = msg.success === msg.total;
+    banner.style.background = allOk ? '#0f9d58' : '#f29900';
+    banner.textContent = `✓ ${msg.success} / ${msg.total} réponses envoyées avec succès.`;
     isRunning = false;
     setTimeout(() => banner.remove(), 6000);
   }
 });
 
-// ── Interception du clic natif ─────────────────────────────────────────────────
+// ── Réception de l'interception depuis le monde MAIN ──────────────────────────
+// interceptor.js dispatche un CustomEvent sur document dès qu'il capte
+// un POST vers formResponse. Le monde isolé reçoit cet event normalement.
 
-function isSubmitButton(el) {
-  if (el.closest('#_gfr_overlay')) return false;
-  const btn = el.closest('[role="button"]') ?? el;
-  return /envoyer|submit|soumettre/i.test(btn.textContent.trim());
-}
-
-async function handleGlobalClick(e) {
+document.addEventListener('__gfr_intercepted', async (e) => {
   if (isRunning) return;
-  if (!isSubmitButton(e.target)) return;
 
-  const form = document.querySelector('form[action*="formResponse"]');
-  if (!form) return;
-
-  e.preventDefault();
-  e.stopPropagation();
-
-  const entries = captureEntries(form);
-
-  if (Object.keys(entries).length === 0) {
-    alert('[GForm Repeater] Aucun champ entry.* trouvé. Remplissez le formulaire avant d\'envoyer.');
-    return;
-  }
+  const { url: formAction, body: rawBody } = e.detail;
 
   const n = await askRepetitions();
-  if (n === null) return;
+  if (n === null) return; // annulé
 
   isRunning = true;
   const banner = getBanner();
   banner.style.background = '#1a73e8';
   banner.textContent = `Envoi en cours… 0 / ${n}`;
 
+  // Le service worker ne possède pas de session Google (origin chrome-extension://)
+  // → chaque fetch est anonyme → pas de déduplication côté serveur.
   chrome.runtime.sendMessage({
     type:       'START',
-    entries,
-    formAction: form.action,  // URL formResponse exacte (attribut action du <form>)
+    formAction,
+    rawBody,    // body URLencoded exact, construit par Google Forms (inclut partialResponse)
     n,
-    delay:      800,
+    delay:      1000,
   });
-}
-
-document.addEventListener('mousedown', handleGlobalClick, true);
+});

@@ -1,14 +1,22 @@
 {
   "manifest_version": 3,
   "name": "GForm Repeater",
-  "version": "4.0",
-  "permissions": ["tabs", "scripting"],
+  "version": "5.0",
+  "permissions": ["tabs"],
   "host_permissions": ["https://docs.google.com/*"],
   "background": { "service_worker": "background.js" },
-  "content_scripts": [{
-    "matches": ["https://docs.google.com/forms/*"],
-    "js": ["content.js"],
-    "run_at": "document_idle"
-  }],
+  "content_scripts": [
+    {
+      "matches": ["https://docs.google.com/forms/*"],
+      "js": ["interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://docs.google.com/forms/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": { "default_popup": "popup.html" }
 }

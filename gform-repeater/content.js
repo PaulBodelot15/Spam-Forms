@@ -1,24 +1,29 @@
 let isRunning = false;
 
-// ── Capture ────────────────────────────────────────────────────────────────────
+// ── Capture des entry.* ────────────────────────────────────────────────────────
 
 function captureEntries(form) {
   const entries = {};
+
+  // Méthode principale : FormData (fonctionne si les hidden inputs sont à jour)
   try {
     new FormData(form).forEach((v, k) => {
-      if (!k) return;
-      entries[k] = k in entries ? [].concat(entries[k], v) : v;
+      if (k.startsWith('entry.')) entries[k] = v;
     });
   } catch (_) {}
 
-  form.querySelectorAll('input[name], textarea[name], select[name]').forEach(el => {
-    const k = el.name;
-    if (!k || el.type === 'hidden')            return;
-    if (el.type === 'radio'    && !el.checked) return;
-    if (el.type === 'checkbox' && !el.checked) return;
-    if (k in entries) entries[k] = [].concat(entries[k], el.value);
-    else if (el.value) entries[k] = el.value;
-  });
+  // Fallback : interroger directement les éléments nommés entry.*
+  // (nécessaire quand React n'a pas encore synchronisé son état vers les hidden inputs)
+  if (Object.keys(entries).length === 0) {
+    form.querySelectorAll('[name^="entry."]').forEach(el => {
+      if (el.type === 'radio' || el.type === 'checkbox') {
+        if (el.checked) entries[el.name] = el.value;
+      } else if (el.value) {
+        entries[el.name] = el.value;
+      }
+    });
+  }
+
   return entries;
 }
 
@@ -72,7 +77,7 @@ function askRepetitions() {
   });
 }
 
-// ── Bannière ───────────────────────────────────────────────────────────────────
+// ── Bannière de progression ────────────────────────────────────────────────────
 
 function getBanner() {
   let b = document.getElementById('_gfr_banner');
@@ -89,15 +94,7 @@ function getBanner() {
   return b;
 }
 
-// ── Détection du bouton natif ──────────────────────────────────────────────────
-
-function isSubmitButton(el) {
-  if (el.closest('#_gfr_overlay')) return false;
-  const btn = el.closest('[role="button"]') ?? el;
-  return /envoyer|submit|soumettre/i.test(btn.textContent.trim());
-}
-
-// ── Messages du background (progression) ──────────────────────────────────────
+// ── Écoute de la progression renvoyée par le background ───────────────────────
 
 chrome.runtime.onMessage.addListener((msg) => {
   const banner = getBanner();
@@ -106,18 +103,22 @@ chrome.runtime.onMessage.addListener((msg) => {
     banner.textContent = `Envoi en cours… ${msg.current} / ${msg.total}`;
   }
   if (msg.type === 'DONE') {
-    banner.style.background = '#0f9d58';
-    banner.textContent = `✓ ${msg.total} réponses envoyées avec succès !`;
+    banner.style.background = msg.success === msg.total ? '#0f9d58' : '#f29900';
+    banner.textContent = `✓ ${msg.success} / ${msg.total} réponses envoyées.`;
     isRunning = false;
     setTimeout(() => banner.remove(), 6000);
   }
 });
 
-// ── Interception du mousedown natif ───────────────────────────────────────────
+// ── Interception du clic natif ─────────────────────────────────────────────────
+
+function isSubmitButton(el) {
+  if (el.closest('#_gfr_overlay')) return false;
+  const btn = el.closest('[role="button"]') ?? el;
+  return /envoyer|submit|soumettre/i.test(btn.textContent.trim());
+}
 
 async function handleGlobalClick(e) {
-  // Ignorer les clics automatisés injectés par le background dans cet onglet
-  if (window._gfrAutoSubmit) return;
   if (isRunning) return;
   if (!isSubmitButton(e.target)) return;
 
@@ -127,24 +128,28 @@ async function handleGlobalClick(e) {
   e.preventDefault();
   e.stopPropagation();
 
-  const raw = captureEntries(form);
-  const entries = Object.fromEntries(
-    Object.entries(raw).filter(([k]) => k.startsWith('entry.'))
-  );
+  const entries = captureEntries(form);
+
+  if (Object.keys(entries).length === 0) {
+    alert('[GForm Repeater] Aucun champ entry.* trouvé. Remplissez le formulaire avant d\'envoyer.');
+    return;
+  }
 
   const n = await askRepetitions();
   if (n === null) return;
-
-  // URL du formulaire vierge (sans paramètres de session)
-  const formUrl = location.href.split('?')[0].replace(/\/formResponse$/, '/viewform');
 
   isRunning = true;
   const banner = getBanner();
   banner.style.background = '#1a73e8';
   banner.textContent = `Envoi en cours… 0 / ${n}`;
 
-  // Délègue tout au service worker — plus aucun fetch ici
-  chrome.runtime.sendMessage({ type: 'START', entries, formUrl, n, delay: 1500 });
+  chrome.runtime.sendMessage({
+    type:       'START',
+    entries,
+    formAction: form.action,  // URL formResponse exacte (attribut action du <form>)
+    n,
+    delay:      800,
+  });
 }
 
 document.addEventListener('mousedown', handleGlobalClick, true);

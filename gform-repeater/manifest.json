@@ -1,21 +1,14 @@
 {
   "manifest_version": 3,
   "name": "GForm Repeater",
-  "version": "3.0",
-  "description": "Soumettre un Google Form N fois via onglets natifs",
-  "permissions": ["tabs", "scripting", "activeTab"],
-  "host_permissions": ["https://docs.google.com/forms/*"],
-  "action": {
-    "default_popup": "popup.html"
-  },
-  "background": {
-    "service_worker": "background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": ["https://docs.google.com/forms/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ]
+  "version": "4.0",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": ["https://docs.google.com/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{
+    "matches": ["https://docs.google.com/forms/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }],
+  "action": { "default_popup": "popup.html" }
 }

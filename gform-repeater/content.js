@@ -1,13 +1,9 @@
-const DELAY_MS = 500;
 let isRunning = false;
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// ── Capture ────────────────────────────────────────────────────────────────────
 
-// FormData seul ne suffit pas : React stocke les valeurs dans son état interne
-// et ne les synchronise pas toujours vers les champs hidden avant le clic.
 function captureEntries(form) {
   const entries = {};
-
   try {
     new FormData(form).forEach((v, k) => {
       if (!k) return;
@@ -17,60 +13,16 @@ function captureEntries(form) {
 
   form.querySelectorAll('input[name], textarea[name], select[name]').forEach(el => {
     const k = el.name;
-    if (!k || el.type === 'hidden')              return;
-    if (el.type === 'radio'    && !el.checked)   return;
-    if (el.type === 'checkbox' && !el.checked)   return;
-    if (k in entries)  entries[k] = [].concat(entries[k], el.value);
+    if (!k || el.type === 'hidden')            return;
+    if (el.type === 'radio'    && !el.checked) return;
+    if (el.type === 'checkbox' && !el.checked) return;
+    if (k in entries) entries[k] = [].concat(entries[k], el.value);
     else if (el.value) entries[k] = el.value;
   });
-
   return entries;
 }
 
-function buildBody(entries) {
-  const p = new URLSearchParams();
-  for (const [k, v] of Object.entries(entries)) {
-    [].concat(v).forEach(val => p.append(k, val));
-  }
-  return p.toString();
-}
-
-// Génère un fbzx aléatoire à 18 chiffres (grand entier négatif, format attendu par Google).
-// Chaque requête obtient le sien → aucune déduplication côté serveur possible.
-function randomFbzx() {
-  const hi = Math.floor(Math.random() * 9) + 1;
-  const lo = String(Math.floor(Math.random() * 1e17)).padStart(17, '0');
-  return `-${hi}${lo}`;
-}
-
-// entryBody : URLSearchParams stringifiée contenant UNIQUEMENT les entry.* de l'utilisateur.
-// Les champs système sont régénérés ici pour chaque envoi afin d'apparaître comme
-// une soumission distincte et anonyme aux yeux de Google.
-async function postForm(action, entryBody) {
-  const fbzx = randomFbzx();
-  const sys  = new URLSearchParams({
-    fvv:           '1',
-    pageHistory:   '0',
-    fbzx,
-    draftResponse: `[null,null,${fbzx}]`,
-  });
-  const body = entryBody ? `${entryBody}&${sys}` : sys.toString();
-
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 20_000);
-  try {
-    await fetch(action, {
-      method:      'POST',
-      headers:     { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-      credentials: 'omit',    // pas de cookie → chaque requête paraît anonyme/fraîche
-      redirect:    'manual',  // ne pas suivre la redirection : évite les side-effects de session
-      signal:      ctrl.signal,
-    });
-  } finally {
-    clearTimeout(t);
-  }
-}
+// ── Modale ─────────────────────────────────────────────────────────────────────
 
 function askRepetitions() {
   return new Promise(resolve => {
@@ -120,6 +72,8 @@ function askRepetitions() {
   });
 }
 
+// ── Bannière ───────────────────────────────────────────────────────────────────
+
 function getBanner() {
   let b = document.getElementById('_gfr_banner');
   if (!b) {
@@ -135,68 +89,62 @@ function getBanner() {
   return b;
 }
 
+// ── Détection du bouton natif ──────────────────────────────────────────────────
+
 function isSubmitButton(el) {
   if (el.closest('#_gfr_overlay')) return false;
   const btn = el.closest('[role="button"]') ?? el;
   return /envoyer|submit|soumettre/i.test(btn.textContent.trim());
 }
 
+// ── Messages du background (progression) ──────────────────────────────────────
+
+chrome.runtime.onMessage.addListener((msg) => {
+  const banner = getBanner();
+  if (msg.type === 'PROGRESS') {
+    banner.style.background = '#1a73e8';
+    banner.textContent = `Envoi en cours… ${msg.current} / ${msg.total}`;
+  }
+  if (msg.type === 'DONE') {
+    banner.style.background = '#0f9d58';
+    banner.textContent = `✓ ${msg.total} réponses envoyées avec succès !`;
+    isRunning = false;
+    setTimeout(() => banner.remove(), 6000);
+  }
+});
+
+// ── Interception du mousedown natif ───────────────────────────────────────────
+
 async function handleGlobalClick(e) {
+  // Ignorer les clics automatisés injectés par le background dans cet onglet
+  if (window._gfrAutoSubmit) return;
   if (isRunning) return;
   if (!isSubmitButton(e.target)) return;
 
   const form = document.querySelector('form[action*="formResponse"]');
   if (!form) return;
 
-  // Court-circuite le gestionnaire interne de Google avant qu'il ne s'exécute.
   e.preventDefault();
   e.stopPropagation();
 
-  // Capture au moment du clic, avant l'ouverture de la modale.
-  // On ne conserve que les champs de réponse utilisateur (entry.*) pour que
-  // chaque fetch soit traité comme une soumission indépendante par Google.
-  const raw     = captureEntries(form);
+  const raw = captureEntries(form);
   const entries = Object.fromEntries(
     Object.entries(raw).filter(([k]) => k.startsWith('entry.'))
   );
-  const submitEl = e.target.closest('[role="button"]') ?? e.target;
 
   const n = await askRepetitions();
-  if (n === null) return; // annulé — on ne soumet pas
+  if (n === null) return;
 
-  const action = form.action.includes('formResponse')
-    ? form.action
-    : location.href.replace(/\/viewform.*$/, '/formResponse');
+  // URL du formulaire vierge (sans paramètres de session)
+  const formUrl = location.href.split('?')[0].replace(/\/formResponse$/, '/viewform');
 
-  const body   = buildBody(entries);
+  isRunning = true;
   const banner = getBanner();
   banner.style.background = '#1a73e8';
   banner.textContent = `Envoi en cours… 0 / ${n}`;
-  isRunning = true;
 
-  for (let i = 0; i < n; i++) {
-    if (i > 0) await sleep(DELAY_MS + Math.random() * DELAY_MS);
-    try {
-      await postForm(action, body);
-    } catch (err) {
-      console.warn('[GFormRepeater] erreur:', err.name === 'AbortError' ? 'timeout' : err);
-    }
-    banner.textContent = `Envoi en cours… ${i + 1} / ${n}`;
-  }
-
-  banner.style.background = '#0f9d58';
-  banner.textContent = `✓ ${n} réponses envoyées avec succès !`;
-  isRunning = false;
-
-  // Supprime notre intercepteur puis re-déclenche le bouton pour laisser Google
-  // exécuter sa logique native et afficher la page de confirmation.
-  await sleep(1000);
-  document.removeEventListener('mousedown', handleGlobalClick, true);
-
-  const opts = { bubbles: true, cancelable: true, view: window };
-  submitEl.dispatchEvent(new MouseEvent('mousedown', opts));
-  submitEl.dispatchEvent(new MouseEvent('mouseup', opts));
-  submitEl.dispatchEvent(new MouseEvent('click', opts));
+  // Délègue tout au service worker — plus aucun fetch ici
+  chrome.runtime.sendMessage({ type: 'START', entries, formUrl, n, delay: 1500 });
 }
 
 document.addEventListener('mousedown', handleGlobalClick, true);

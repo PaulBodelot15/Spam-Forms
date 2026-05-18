@@ -3,7 +3,7 @@
   "name": "GForm Repeater",
   "version": "1.0",
   "description": "Soumettre un Google Form N fois automatiquement",
-  "permissions": ["storage", "tabs"],
+  "permissions": [],
   "host_permissions": ["https://docs.google.com/forms/*"],
   "action": {
     "default_popup": "popup.html"

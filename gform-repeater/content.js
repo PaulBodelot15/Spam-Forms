@@ -1,41 +1,10 @@
-const KEY = 'gformRepeater';
-
-async function setState(s) { await chrome.storage.local.set({ [KEY]: s }); }
-async function getState()  { return (await chrome.storage.local.get(KEY))[KEY] ?? null; }
+const DELAY_MS = 500;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// Capture all form entries via FormData + visible named inputs fallback.
-function captureEntries(form) {
-  const entries = {};
-
-  try {
-    new FormData(form).forEach((v, k) => {
-      if (!k) return;
-      if (k in entries) entries[k] = [].concat(entries[k], v);
-      else entries[k] = v;
-    });
-  } catch (_) {}
-
-  // Fallback: visible inputs React may not have synced to hidden fields yet.
-  form.querySelectorAll('input[name], textarea[name], select[name]').forEach(el => {
-    const k = el.name;
-    if (!k) return;
-    if (el.type === 'radio'    && !el.checked)  return;
-    if (el.type === 'checkbox' && !el.checked)  return;
-    if (el.type === 'hidden')                   return; // already got these via FormData
-    if (k in entries)   entries[k] = [].concat(entries[k], el.value);
-    else if (el.value)  entries[k] = el.value;
-  });
-
-  return entries;
-}
-
-function buildBody(entries) {
+function buildBody(formData) {
   const p = new URLSearchParams();
-  for (const [k, v] of Object.entries(entries)) {
-    [].concat(v).forEach(val => p.append(k, val));
-  }
+  formData.forEach((v, k) => p.append(k, v));
   return p.toString();
 }
 
@@ -45,10 +14,7 @@ async function postForm(action, body) {
   try {
     await fetch(action, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': action.replace('formResponse', 'viewform'),
-      },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
       credentials: 'include',
       redirect: 'follow',
@@ -59,80 +25,117 @@ async function postForm(action, body) {
   }
 }
 
-function notifyPopup(msg) {
-  chrome.runtime.sendMessage(msg).catch(() => {});
+function askRepetitions() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = [
+      'position:fixed', 'inset:0', 'z-index:2147483647',
+      'background:rgba(0,0,0,.45)',
+      'display:flex', 'align-items:center', 'justify-content:center',
+    ].join(';');
+
+    const box = document.createElement('div');
+    box.style.cssText = [
+      'background:#fff', 'border-radius:8px', 'padding:28px 24px',
+      'min-width:320px', 'box-shadow:0 8px 28px rgba(0,0,0,.25)',
+      'font-family:Google Sans,Roboto,sans-serif',
+    ].join(';');
+
+    box.innerHTML = `
+      <p style="margin:0 0 6px;font-size:16px;font-weight:500;color:#202124">GForm Repeater</p>
+      <p style="margin:0 0 18px;font-size:14px;color:#5f6368">Combien de r&eacute;p&eacute;titions souhaitez-vous envoyer&nbsp;?</p>
+      <input id="_gfr_n" type="number" min="1" value="5"
+        style="width:100%;padding:8px 12px;border:1px solid #dadce0;border-radius:4px;font-size:14px;box-sizing:border-box;margin-bottom:18px;outline:none">
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button id="_gfr_cancel" style="padding:8px 20px;border:1px solid #dadce0;border-radius:4px;background:#fff;color:#5f6368;font-size:14px;cursor:pointer">Annuler</button>
+        <button id="_gfr_ok" style="padding:8px 20px;border:none;border-radius:4px;background:#1a73e8;color:#fff;font-size:14px;font-weight:500;cursor:pointer">Envoyer</button>
+      </div>
+    `;
+
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const input = box.querySelector('#_gfr_n');
+    input.focus();
+    input.select();
+
+    const confirm = () => {
+      const n = parseInt(input.value, 10);
+      if (!Number.isFinite(n) || n < 1) {
+        input.style.borderColor = '#d93025';
+        return;
+      }
+      overlay.remove();
+      resolve(n);
+    };
+
+    box.querySelector('#_gfr_ok').addEventListener('click', confirm);
+    box.querySelector('#_gfr_cancel').addEventListener('click', () => { overlay.remove(); resolve(null); });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') confirm(); });
+  });
 }
 
-let running = false;
+function getBanner() {
+  let b = document.getElementById('_gfr_banner');
+  if (!b) {
+    b = document.createElement('div');
+    b.id = '_gfr_banner';
+    b.style.cssText = [
+      'position:fixed', 'top:0', 'left:0', 'right:0', 'z-index:2147483646',
+      'padding:12px 20px', 'font-family:Google Sans,Roboto,sans-serif',
+      'font-size:14px', 'font-weight:500', 'color:#fff', 'text-align:center',
+    ].join(';');
+    document.body.appendChild(b);
+  }
+  return b;
+}
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+async function handleSubmit(e) {
+  e.preventDefault();
 
-  // ── STOP ──────────────────────────────────────────────────────────────────
-  if (msg.type === 'STOP') {
-    running = false;
-    chrome.storage.local.remove(KEY);
-    sendResponse({ ok: true });
-    return true;
+  const form = e.target;
+  const formData = new FormData(form);
+
+  const n = await askRepetitions();
+  if (n === null) return; // annulé — ne rien soumettre
+
+  const action = form.action.includes('formResponse')
+    ? form.action
+    : location.href.replace(/\/viewform.*$/, '/formResponse');
+
+  const body = buildBody(formData);
+  const banner = getBanner();
+  banner.style.background = '#1a73e8';
+  banner.textContent = `Envoi en cours… 0 / ${n}`;
+
+  for (let i = 0; i < n; i++) {
+    if (i > 0) await sleep(DELAY_MS);
+    try {
+      await postForm(action, body);
+    } catch (err) {
+      console.warn('[GFormRepeater] erreur:', err.name === 'AbortError' ? 'timeout' : err);
+    }
+    banner.textContent = `Envoi en cours… ${i + 1} / ${n}`;
   }
 
-  // ── START ─────────────────────────────────────────────────────────────────
-  if (msg.type !== 'START') return;
+  banner.style.background = '#0f9d58';
+  banner.textContent = `✓ ${n} réponses envoyées avec succès !`;
 
-  (async () => {
-    if (running) {
-      sendResponse({ ok: false, error: 'Déjà en cours.' });
-      return;
-    }
+  // Soumettre nativement une dernière fois pour afficher la page de confirmation Google
+  await sleep(1000);
+  form.removeEventListener('submit', handleSubmit);
+  form.submit();
+}
 
-    const form = document.querySelector('form[action*="formResponse"]');
-    if (!form) {
-      sendResponse({ ok: false, error: 'Formulaire Google non trouvé sur cette page.' });
-      return;
-    }
+function attachToForm() {
+  const form = document.querySelector('form[action*="formResponse"]');
+  if (!form || form.dataset.gfrBound) return;
+  form.dataset.gfrBound = '1';
+  form.addEventListener('submit', handleSubmit);
+}
 
-    const entries = captureEntries(form);
-    const entryKeys = Object.keys(entries).filter(k => k.startsWith('entry.'));
+attachToForm();
 
-    console.log('[GFormRepeater] captured entries:', entries);
-
-    if (!entryKeys.length) {
-      sendResponse({ ok: false, error: 'Aucun champ entry.* capturé — remplissez le formulaire d\'abord.' });
-      return;
-    }
-
-    const action = form.action.includes('formResponse')
-      ? form.action
-      : location.href.replace(/\/viewform.*$/, '/formResponse');
-
-    const body = buildBody(entries);
-    const { total, delay } = msg;
-
-    sendResponse({ ok: true });
-    running = true;
-    await setState({ active: true, total, submitted: 0, delay });
-
-    let submitted = 0;
-
-    for (let i = 0; i < total; i++) {
-      if (!running) break;
-      if (i > 0) await sleep(delay);
-      if (!running) break;
-
-      try {
-        await postForm(action, body);
-      } catch (e) {
-        console.warn('[GFormRepeater] submit error:', e.name === 'AbortError' ? 'timeout' : e);
-      }
-
-      submitted = i + 1;
-      await setState({ active: submitted < total, total, submitted, delay });
-      notifyPopup({ type: 'PROGRESS', submitted, total });
-    }
-
-    running = false;
-    await setState({ active: false, total, submitted, delay });
-    if (submitted >= total) notifyPopup({ type: 'DONE', total });
-  })();
-
-  return true; // keep channel open for async sendResponse
-});
+// Google Forms est une SPA — surveiller les mutations DOM pour détecter la montée du formulaire
+const observer = new MutationObserver(attachToForm);
+observer.observe(document.body, { childList: true, subtree: true });

@@ -35,17 +35,37 @@ function buildBody(entries) {
   return p.toString();
 }
 
-async function postForm(action, body) {
+// Génère un fbzx aléatoire à 18 chiffres (grand entier négatif, format attendu par Google).
+// Chaque requête obtient le sien → aucune déduplication côté serveur possible.
+function randomFbzx() {
+  const hi = Math.floor(Math.random() * 9) + 1;
+  const lo = String(Math.floor(Math.random() * 1e17)).padStart(17, '0');
+  return `-${hi}${lo}`;
+}
+
+// entryBody : URLSearchParams stringifiée contenant UNIQUEMENT les entry.* de l'utilisateur.
+// Les champs système sont régénérés ici pour chaque envoi afin d'apparaître comme
+// une soumission distincte et anonyme aux yeux de Google.
+async function postForm(action, entryBody) {
+  const fbzx = randomFbzx();
+  const sys  = new URLSearchParams({
+    fvv:           '1',
+    pageHistory:   '0',
+    fbzx,
+    draftResponse: `[null,null,${fbzx}]`,
+  });
+  const body = entryBody ? `${entryBody}&${sys}` : sys.toString();
+
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 20_000);
   try {
     await fetch(action, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      method:      'POST',
+      headers:     { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
-      credentials: 'include',
-      redirect: 'follow',
-      signal: ctrl.signal,
+      credentials: 'omit',    // pas de cookie → chaque requête paraît anonyme/fraîche
+      redirect:    'manual',  // ne pas suivre la redirection : évite les side-effects de session
+      signal:      ctrl.signal,
     });
   } finally {
     clearTimeout(t);
@@ -155,7 +175,7 @@ async function handleGlobalClick(e) {
   isRunning = true;
 
   for (let i = 0; i < n; i++) {
-    if (i > 0) await sleep(DELAY_MS);
+    if (i > 0) await sleep(DELAY_MS + Math.random() * DELAY_MS);
     try {
       await postForm(action, body);
     } catch (err) {

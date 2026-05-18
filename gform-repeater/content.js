@@ -1,9 +1,14 @@
-// Monde ISOLÉ — reçoit les données via CustomEvent depuis interceptor.js,
-// affiche la modale, délègue les N envois au service worker.
+// Monde ISOLÉ — reçoit les données via CustomEvent depuis interceptor.js (monde MAIN),
+// affiche la modale, délègue les N envois au service worker background.
 
 let isRunning = false;
+let activeOverlay = null; // référence à la modale active pour la MutationObserver
 
 // ── Modale ─────────────────────────────────────────────────────────────────────
+// Retourne une Promise qui résout avec N (entier) ou null (annulation).
+// La modale est créée synchroniquement et attachée à <html> (documentElement),
+// pas à <body> : Google Forms peut remplacer le contenu de <body> lors de l'affichage
+// de la page de confirmation SPA — documentElement lui n'est jamais recréé.
 
 function askRepetitions() {
   return new Promise(resolve => {
@@ -34,26 +39,35 @@ function askRepetitions() {
     `;
 
     overlay.appendChild(box);
-    document.body.appendChild(overlay);
+
+    // Attacher à <html>, pas à <body> — survit aux remplacements de body par la SPA
+    document.documentElement.appendChild(overlay);
+    activeOverlay = overlay;
 
     const input = box.querySelector('#_gfr_n');
     input.focus();
     input.select();
 
+    const done = (value) => {
+      overlay.remove();
+      activeOverlay = null;
+      resolve(value);
+    };
+
     const confirm = () => {
       const n = parseInt(input.value, 10);
       if (!Number.isFinite(n) || n < 1) { input.style.borderColor = '#d93025'; return; }
-      overlay.remove();
-      resolve(n);
+      done(n);
     };
 
     box.querySelector('#_gfr_ok').addEventListener('click', confirm);
-    box.querySelector('#_gfr_cancel').addEventListener('click', () => { overlay.remove(); resolve(null); });
+    box.querySelector('#_gfr_cancel').addEventListener('click', () => done(null));
     input.addEventListener('keydown', e => { if (e.key === 'Enter') confirm(); });
   });
 }
 
-// ── Bannière ───────────────────────────────────────────────────────────────────
+// ── Bannière de progression ────────────────────────────────────────────────────
+// Également attachée à documentElement pour la même raison.
 
 function getBanner() {
   let b = document.getElementById('_gfr_banner');
@@ -65,12 +79,60 @@ function getBanner() {
       'padding:12px 20px', 'font-family:Google Sans,Roboto,sans-serif',
       'font-size:14px', 'font-weight:500', 'color:#fff', 'text-align:center',
     ].join(';');
-    document.body.appendChild(b);
+    document.documentElement.appendChild(b);
   }
   return b;
 }
 
-// ── Progression renvoyée par le background ─────────────────────────────────────
+// ── MutationObserver : ré-ancrage de la modale si Google remplace body ─────────
+// Si Google Forms vide document.body lors de la transition vers la confirmation,
+// l'overlay (attaché à html) survit. Mais si html lui-même était modifié (très rare),
+// cet observer le ré-insère.
+
+const domGuard = new MutationObserver(() => {
+  if (activeOverlay && !document.documentElement.contains(activeOverlay)) {
+    document.documentElement.appendChild(activeOverlay);
+  }
+});
+domGuard.observe(document.documentElement, { childList: true });
+
+// ── Interception du fetch Google Forms ─────────────────────────────────────────
+// interceptor.js (monde MAIN) dispatche '__gfr_intercepted' sur document
+// au moment où Google Forms appelle fetch() vers formResponse.
+// Ce listener (monde ISOLÉ) le reçoit car les CustomEvents traversent la frontière
+// MAIN ↔ ISOLATED via le DOM partagé.
+
+document.addEventListener('__gfr_intercepted', async (e) => {
+  if (isRunning) return;
+  isRunning = true;
+
+  const { url: formAction, body: rawBody } = e.detail;
+
+  // La modale est créée ici synchroniquement (avant tout await) →
+  // elle est dans le DOM avant que Google mette à jour la page.
+  const n = await askRepetitions();
+
+  if (n === null) {
+    isRunning = false;
+    return; // annulé
+  }
+
+  const banner = getBanner();
+  banner.style.background = '#1a73e8';
+  banner.textContent = `Envoi en cours… 0 / ${n}`;
+
+  // Le service worker n'a pas de session Google (origine chrome-extension://)
+  // → requêtes cross-origin → aucun cookie Google envoyé → pas de déduplication.
+  chrome.runtime.sendMessage({
+    type:       'START',
+    formAction,
+    rawBody,
+    n,
+    delay:      1000,
+  });
+});
+
+// ── Messages de progression depuis background.js ───────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg) => {
   const banner = getBanner();
@@ -79,38 +141,9 @@ chrome.runtime.onMessage.addListener((msg) => {
     banner.textContent = `Envoi en cours… ${msg.current} / ${msg.total}`;
   }
   if (msg.type === 'DONE') {
-    const allOk = msg.success === msg.total;
-    banner.style.background = allOk ? '#0f9d58' : '#f29900';
+    banner.style.background = msg.success === msg.total ? '#0f9d58' : '#f29900';
     banner.textContent = `✓ ${msg.success} / ${msg.total} réponses envoyées avec succès.`;
     isRunning = false;
     setTimeout(() => banner.remove(), 6000);
   }
-});
-
-// ── Réception de l'interception depuis le monde MAIN ──────────────────────────
-// interceptor.js dispatche un CustomEvent sur document dès qu'il capte
-// un POST vers formResponse. Le monde isolé reçoit cet event normalement.
-
-document.addEventListener('__gfr_intercepted', async (e) => {
-  if (isRunning) return;
-
-  const { url: formAction, body: rawBody } = e.detail;
-
-  const n = await askRepetitions();
-  if (n === null) return; // annulé
-
-  isRunning = true;
-  const banner = getBanner();
-  banner.style.background = '#1a73e8';
-  banner.textContent = `Envoi en cours… 0 / ${n}`;
-
-  // Le service worker ne possède pas de session Google (origin chrome-extension://)
-  // → chaque fetch est anonyme → pas de déduplication côté serveur.
-  chrome.runtime.sendMessage({
-    type:       'START',
-    formAction,
-    rawBody,    // body URLencoded exact, construit par Google Forms (inclut partialResponse)
-    n,
-    delay:      1000,
-  });
 });

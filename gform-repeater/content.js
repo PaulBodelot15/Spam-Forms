@@ -1,10 +1,37 @@
 const DELAY_MS = 500;
+let isRunning = false;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function buildBody(formData) {
+// FormData seul ne suffit pas : React stocke les valeurs dans son état interne
+// et ne les synchronise pas toujours vers les champs hidden avant le clic.
+function captureEntries(form) {
+  const entries = {};
+
+  try {
+    new FormData(form).forEach((v, k) => {
+      if (!k) return;
+      entries[k] = k in entries ? [].concat(entries[k], v) : v;
+    });
+  } catch (_) {}
+
+  form.querySelectorAll('input[name], textarea[name], select[name]').forEach(el => {
+    const k = el.name;
+    if (!k || el.type === 'hidden')              return;
+    if (el.type === 'radio'    && !el.checked)   return;
+    if (el.type === 'checkbox' && !el.checked)   return;
+    if (k in entries)  entries[k] = [].concat(entries[k], el.value);
+    else if (el.value) entries[k] = el.value;
+  });
+
+  return entries;
+}
+
+function buildBody(entries) {
   const p = new URLSearchParams();
-  formData.forEach((v, k) => p.append(k, v));
+  for (const [k, v] of Object.entries(entries)) {
+    [].concat(v).forEach(val => p.append(k, val));
+  }
   return p.toString();
 }
 
@@ -61,10 +88,7 @@ function askRepetitions() {
 
     const confirm = () => {
       const n = parseInt(input.value, 10);
-      if (!Number.isFinite(n) || n < 1) {
-        input.style.borderColor = '#d93025';
-        return;
-      }
+      if (!Number.isFinite(n) || n < 1) { input.style.borderColor = '#d93025'; return; }
       overlay.remove();
       resolve(n);
     };
@@ -90,23 +114,39 @@ function getBanner() {
   return b;
 }
 
-async function handleSubmit(e) {
-  e.preventDefault();
+// Vérifie si l'élément (ou son ancêtre [role="button"] le plus proche) est le bouton de soumission.
+function isSubmitButton(el) {
+  const btn = el.closest('[role="button"]') ?? el;
+  return /^(envoyer|submit)$/i.test(btn.textContent.trim());
+}
 
-  const form = e.target;
-  const formData = new FormData(form);
+async function handleGlobalClick(e) {
+  if (isRunning) return;
+  if (!isSubmitButton(e.target)) return;
+
+  const form = document.querySelector('form[action*="formResponse"]');
+  if (!form) return;
+
+  // Court-circuite le gestionnaire interne de Google avant qu'il ne s'exécute.
+  e.preventDefault();
+  e.stopPropagation();
+
+  // Capture au moment du clic, avant l'ouverture de la modale.
+  const entries  = captureEntries(form);
+  const submitEl = e.target.closest('[role="button"]') ?? e.target;
 
   const n = await askRepetitions();
-  if (n === null) return; // annulé — ne rien soumettre
+  if (n === null) return; // annulé — on ne soumet pas
 
   const action = form.action.includes('formResponse')
     ? form.action
     : location.href.replace(/\/viewform.*$/, '/formResponse');
 
-  const body = buildBody(formData);
+  const body   = buildBody(entries);
   const banner = getBanner();
   banner.style.background = '#1a73e8';
   banner.textContent = `Envoi en cours… 0 / ${n}`;
+  isRunning = true;
 
   for (let i = 0; i < n; i++) {
     if (i > 0) await sleep(DELAY_MS);
@@ -119,23 +159,20 @@ async function handleSubmit(e) {
   }
 
   banner.style.background = '#0f9d58';
-  banner.textContent = `✓ ${n} réponses envoyées avec succès !`;
+  banner.textContent = `✓ ${n} réponses envoyées avec succès !`;
+  isRunning = false;
 
-  // Soumettre nativement une dernière fois pour afficher la page de confirmation Google
+  // Supprime notre intercepteur puis re-déclenche le bouton pour laisser Google
+  // exécuter sa logique native et afficher la page de confirmation.
   await sleep(1000);
-  form.removeEventListener('submit', handleSubmit);
-  form.submit();
+  document.removeEventListener('click', handleGlobalClick, true);
+
+  // Préfère une re-requête au cas où React aurait recréé le nœud DOM.
+  const btn = document.querySelector('[role="button"]') &&
+    [...document.querySelectorAll('[role="button"]')]
+      .find(b => /^(envoyer|submit)$/i.test(b.textContent.trim()));
+
+  (btn ?? submitEl).click();
 }
 
-function attachToForm() {
-  const form = document.querySelector('form[action*="formResponse"]');
-  if (!form || form.dataset.gfrBound) return;
-  form.dataset.gfrBound = '1';
-  form.addEventListener('submit', handleSubmit);
-}
-
-attachToForm();
-
-// Google Forms est une SPA — surveiller les mutations DOM pour détecter la montée du formulaire
-const observer = new MutationObserver(attachToForm);
-observer.observe(document.body, { childList: true, subtree: true });
+document.addEventListener('click', handleGlobalClick, true);
